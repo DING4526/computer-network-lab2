@@ -1,19 +1,37 @@
 #pragma once
-#define _WINSOCK_DEPRECATED_NO_WARNINGS
-#ifndef NOMINMAX
-#define NOMINMAX
+
+#ifdef _WIN32
+    #define _WINSOCK_DEPRECATED_NO_WARNINGS
+    #ifndef NOMINMAX
+    #define NOMINMAX
+    #endif
+    #include <winsock2.h>
+    #include <ws2tcpip.h>
+    #pragma comment(lib, "ws2_32.lib")
+    typedef int socklen_t;
+#else
+    // Linux/POSIX
+    #include <sys/socket.h>
+    #include <sys/types.h>
+    #include <netinet/in.h>
+    #include <arpa/inet.h>
+    #include <unistd.h>
+    #include <fcntl.h>
+    #include <errno.h>
+    typedef int SOCKET;
+    #define INVALID_SOCKET -1
+    #define SOCKET_ERROR -1
+    #define closesocket close
+    inline int WSAGetLastError() { return errno; }
+    inline void Sleep(int ms) { usleep(ms * 1000); }
 #endif
 
-#include <winsock2.h>
-#include <ws2tcpip.h>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
 #include <chrono>
-
-#pragma comment(lib, "ws2_32.lib")
 
 // ====== 可调参数 ======
 static const int    RDT_MSS = 1000;              // 每个数据段payload最大长度（字节）

@@ -9,8 +9,14 @@ static void die(const char* msg) {
 }
 
 static void set_nonblocking(SOCKET s) {
+#ifdef _WIN32
     u_long mode = 1;
     if (ioctlsocket(s, FIONBIO, &mode) != 0) die("ioctlsocket nonblocking failed");
+#else
+    int flags = fcntl(s, F_GETFL, 0);
+    if (flags == -1 || fcntl(s, F_SETFL, flags | O_NONBLOCK) == -1)
+        die("fcntl nonblocking failed");
+#endif
 }
 
 static double rnd01() {
@@ -67,8 +73,10 @@ int main(int argc, char** argv) {
     int fixed_wnd = atoi(argv[4]);
     double loss_rate = atof(argv[5]);
 
+#ifdef _WIN32
     WSADATA wsa;
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) die("WSAStartup");
+#endif
 
     SOCKET sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock == INVALID_SOCKET) die("socket");
@@ -368,6 +376,8 @@ int main(int argc, char** argv) {
     printf("Transfer done. time=%.3f s, avg throughput=%.3f MB/s\n", sec, throughput);
 
     closesocket(sock);
+#ifdef _WIN32
     WSACleanup();
+#endif
     return 0;
 }
