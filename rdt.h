@@ -22,8 +22,6 @@ static const int    RDT_MAX_PKT = 1400;          // UDP payload最大（保守�
 static const int    RDT_RTO_MS = 300;            // 简化：固定RTO
 static const int    RDT_HANDSHAKE_RTO_MS = 300;  // SYN/FIN重传超时
 static const int    RDT_MAX_RETX = 50;           // 防止死循环
-static const int    RDT_DELAY_MIN_MS = 5;        // 网络延时下限（毫秒）
-static const int    RDT_DELAY_MAX_MS = 10;       // 网络延时上限（毫秒）
 static const int    RDT_OOO_MAX_SEGS = 128;      // 接收端乱序缓冲最大段数
 
 // ====== flags ======

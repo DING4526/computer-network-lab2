@@ -19,19 +19,11 @@ static double rnd01() {
     return dist(rng);
 }
 
-// 生成随机延时（5-10ms）
-static int random_delay_ms() {
-    return RDT_DELAY_MIN_MS + (int)(rnd01() * (RDT_DELAY_MAX_MS - RDT_DELAY_MIN_MS + 1));
-}
-
 static int send_pkt_lossy(SOCKET s, const sockaddr_in& peer, RdtHeader h, const uint8_t* payload, double loss_rate) {
     // 模拟丢包（便于实验测试不同丢包率）
     if (loss_rate > 0.0 && rnd01() < loss_rate) {
         return int(sizeof(RdtHeader) + h.len); // pretend sent
     }
-    // 模拟网络延时
-    Sleep(random_delay_ms());
-    
     fill_checksum(h, payload);
     RdtHeader net = h;
     hton_header(net);
