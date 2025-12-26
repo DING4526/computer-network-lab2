@@ -1,6 +1,9 @@
 #include "rdt.h"
 #include <map>
 #include <vector>
+#include <random>
+
+static const int OOO_MAX_SEGMENTS = 128; // ooo缓冲最大段数限制
 
 struct SegmentBuf {
     std::vector<uint8_t> data;
@@ -16,7 +19,25 @@ static void set_nonblocking(SOCKET s) {
     if (ioctlsocket(s, FIONBIO, &mode) != 0) die("ioctlsocket nonblocking failed");
 }
 
-static int send_pkt(SOCKET s, const sockaddr_in& peer, RdtHeader h, const uint8_t* payload) {
+static double rnd01() {
+    static std::mt19937 rng((unsigned)time(nullptr) + 12345);
+    static std::uniform_real_distribution<double> dist(0.0, 1.0);
+    return dist(rng);
+}
+
+// 生成随机延时（5-10ms）
+static int random_delay_ms() {
+    return RDT_DELAY_MIN_MS + (int)(rnd01() * (RDT_DELAY_MAX_MS - RDT_DELAY_MIN_MS + 1));
+}
+
+static int send_pkt_lossy(SOCKET s, const sockaddr_in& peer, RdtHeader h, const uint8_t* payload, double loss_rate) {
+    // 模拟丢包（ACK也可能丢失，实现双向丢包）
+    if (loss_rate > 0.0 && rnd01() < loss_rate) {
+        return int(sizeof(RdtHeader) + h.len); // pretend sent
+    }
+    // 模拟网络延时
+    Sleep(random_delay_ms());
+    
     // checksum在host序算，最后整体转network序发送
     fill_checksum(h, payload);
     RdtHeader net = h;
@@ -31,30 +52,31 @@ static int send_pkt(SOCKET s, const sockaddr_in& peer, RdtHeader h, const uint8_
     return n;
 }
 
-// 计算SACK位图：对 expected_ack 后面的 若干 个分片
-static uint32_t build_sack_mask(uint32_t expected_ack, int fixed_wnd,
+// 计算SACK位图：对 expected_ack 后面的 若干 个分片（扩展到64位）
+static uint64_t build_sack_mask(uint32_t expected_ack, int fixed_wnd,
                                const std::map<uint32_t, SegmentBuf>& ooo) {
-    uint32_t mask = 0;
+    uint64_t mask = 0;
     // 位 i 表示 expected_ack + (i+1)*MSS 处的分片起点是否已收到
-    for (int i = 0; i < RDT_SACK_BITS; i++) {
+    int bits_to_check = std::min(RDT_SACK_BITS, fixed_wnd);
+    for (int i = 0; i < bits_to_check; i++) {
         uint32_t seq = expected_ack + uint32_t((i + 1) * RDT_MSS);
         if (ooo.find(seq) != ooo.end()) {
-            mask |= (1u << i);
+            mask |= (1ull << i);
         }
     }
-    (void)fixed_wnd; // 固定窗口在本实现里不动态变化
     return mask;
 }
 
 int main(int argc, char** argv) {
-    if (argc < 5) {
-        printf("Usage: receiver.exe <bind_ip> <bind_port> <output_file> <fixed_wnd_segments>\n");
+    if (argc < 6) {
+        printf("Usage: receiver.exe <bind_ip> <bind_port> <output_file> <fixed_wnd_segments> <loss_rate>\n");
         return 0;
     }
     std::string bind_ip = argv[1];
     int bind_port = atoi(argv[2]);
     std::string out_file = argv[3];
     int fixed_wnd = atoi(argv[4]);
+    double loss_rate = atof(argv[5]);
 
     WSADATA wsa;
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) die("WSAStartup");
@@ -76,8 +98,8 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    printf("Receiver listening on %s:%d, output=%s, fixedWnd=%d\n",
-           bind_ip.c_str(), bind_port, out_file.c_str(), fixed_wnd);
+    printf("Receiver listening on %s:%d, output=%s, fixedWnd=%d, lossRate=%.2f\n",
+           bind_ip.c_str(), bind_port, out_file.c_str(), fixed_wnd, loss_rate);
 
     // ====== 连接状态 ======
     enum { R_CLOSED, R_SYN_RCVD, R_EST, R_FIN_WAIT } state = R_CLOSED;
@@ -128,7 +150,7 @@ int main(int argc, char** argv) {
                     synack.wnd = (uint16_t)fixed_wnd;
                     synack.len = 0;
                     synack.sack_mask = 0;
-                    send_pkt(sock, peer, synack, nullptr);
+                    send_pkt_lossy(sock, peer, synack, nullptr, loss_rate);
                     continue;
                 }
             } else {
@@ -157,7 +179,7 @@ int main(int argc, char** argv) {
                     ack.wnd = (uint16_t)fixed_wnd;
                     ack.len = 0;
                     ack.sack_mask = 0;
-                    send_pkt(sock, peer, ack, nullptr);
+                    send_pkt_lossy(sock, peer, ack, nullptr, loss_rate);
 
                     // 发送自己的FIN
                     RdtHeader fin{};
@@ -167,7 +189,7 @@ int main(int argc, char** argv) {
                     fin.wnd = (uint16_t)fixed_wnd;
                     fin.len = 0;
                     fin.sack_mask = 0;
-                    send_pkt(sock, peer, fin, nullptr);
+                    send_pkt_lossy(sock, peer, fin, nullptr, loss_rate);
                     state = R_FIN_WAIT;
                     continue;
                 }
@@ -190,7 +212,7 @@ int main(int argc, char** argv) {
                     } else if (h.seq > expected_ack) {
                         // 乱序：若在接收窗口范围内则缓存（按fixed_wnd*MSS限制）
                         uint32_t max_seq = expected_ack + (uint32_t)(fixed_wnd * RDT_MSS);
-                        if (h.seq < max_seq) {
+                        if (h.seq < max_seq && (int)ooo.size() < OOO_MAX_SEGMENTS) {
                             if (ooo.find(h.seq) == ooo.end()) {
                                 SegmentBuf sb;
                                 sb.data.assign(payload, payload + h.len);
@@ -209,7 +231,7 @@ int main(int argc, char** argv) {
                     ack.wnd = (uint16_t)fixed_wnd;
                     ack.len = 0;
                     ack.sack_mask = build_sack_mask(expected_ack, fixed_wnd, ooo);
-                    send_pkt(sock, peer, ack, nullptr);
+                    send_pkt_lossy(sock, peer, ack, nullptr, loss_rate);
                     last_ack_sent_ms = now_ms();
                 }
             } else if (state == R_FIN_WAIT) {

@@ -17,11 +17,13 @@
 
 // ====== 可调参数 ======
 static const int    RDT_MSS = 1000;              // 每个数据段payload最大长度（字节）
-static const int    RDT_SACK_BITS = 32;          // SACK位图长度
+static const int    RDT_SACK_BITS = 64;          // SACK位图长度（扩展至64以支持更大窗口）
 static const int    RDT_MAX_PKT = 1400;          // UDP payload最大（保守）
 static const int    RDT_RTO_MS = 300;            // 简化：固定RTO
 static const int    RDT_HANDSHAKE_RTO_MS = 300;  // SYN/FIN重传超时
 static const int    RDT_MAX_RETX = 50;           // 防止死循环
+static const int    RDT_DELAY_MIN_MS = 5;        // 网络延时下限（毫秒）
+static const int    RDT_DELAY_MAX_MS = 10;       // 网络延时上限（毫秒）
 
 // ====== flags ======
 enum : uint16_t {
@@ -40,7 +42,7 @@ struct RdtHeader {
     uint16_t wnd;        // 固定窗口（分片数）
     uint16_t len;        // payload长度
     uint16_t cksum;      // checksum (header+payload)
-    uint32_t sack_mask;  // 对 ack 后的 32 个分片的接收情况位图
+    uint64_t sack_mask;  // 对 ack 后的 64 个分片的接收情况位图（扩展至64位）
 };
 #pragma pack(pop)
 
@@ -88,6 +90,18 @@ static inline bool verify_checksum(const RdtHeader& h, const uint8_t* payload) {
     return c == h.cksum;
 }
 
+// 64位主机/网络字节序转换
+static inline uint64_t htonll(uint64_t h) {
+    uint32_t high = htonl((uint32_t)(h >> 32));
+    uint32_t low = htonl((uint32_t)(h & 0xFFFFFFFF));
+    return ((uint64_t)low << 32) | high;
+}
+static inline uint64_t ntohll(uint64_t n) {
+    uint32_t high = ntohl((uint32_t)(n >> 32));
+    uint32_t low = ntohl((uint32_t)(n & 0xFFFFFFFF));
+    return ((uint64_t)low << 32) | high;
+}
+
 // 网络字节序转换：header里的多字节字段都要hton/ntoh
 static inline void hton_header(RdtHeader& h) {
     h.seq = htonl(h.seq);
@@ -96,7 +110,7 @@ static inline void hton_header(RdtHeader& h) {
     h.wnd = htons(h.wnd);
     h.len = htons(h.len);
     h.cksum = htons(h.cksum);
-    h.sack_mask = htonl(h.sack_mask);
+    h.sack_mask = htonll(h.sack_mask);
 }
 static inline void ntoh_header(RdtHeader& h) {
     h.seq = ntohl(h.seq);
@@ -105,5 +119,5 @@ static inline void ntoh_header(RdtHeader& h) {
     h.wnd = ntohs(h.wnd);
     h.len = ntohs(h.len);
     h.cksum = ntohs(h.cksum);
-    h.sack_mask = ntohl(h.sack_mask);
+    h.sack_mask = ntohll(h.sack_mask);
 }

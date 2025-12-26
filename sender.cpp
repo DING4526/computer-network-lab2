@@ -19,11 +19,19 @@ static double rnd01() {
     return dist(rng);
 }
 
+// 生成随机延时（5-10ms）
+static int random_delay_ms() {
+    return RDT_DELAY_MIN_MS + (int)(rnd01() * (RDT_DELAY_MAX_MS - RDT_DELAY_MIN_MS + 1));
+}
+
 static int send_pkt_lossy(SOCKET s, const sockaddr_in& peer, RdtHeader h, const uint8_t* payload, double loss_rate) {
     // 模拟丢包（便于实验测试不同丢包率）
     if (loss_rate > 0.0 && rnd01() < loss_rate) {
         return int(sizeof(RdtHeader) + h.len); // pretend sent
     }
+    // 模拟网络延时
+    Sleep(random_delay_ms());
+    
     fill_checksum(h, payload);
     RdtHeader net = h;
     hton_header(net);
@@ -46,9 +54,9 @@ struct OutSeg {
     int retx = 0;
 };
 
-static void mark_sack_acked(uint32_t cum_ack, uint32_t sack_mask, std::map<uint32_t, OutSeg>& out) {
+static void mark_sack_acked(uint32_t cum_ack, uint64_t sack_mask, std::map<uint32_t, OutSeg>& out) {
     for (int i = 0; i < RDT_SACK_BITS; i++) {
-        if (sack_mask & (1u << i)) {
+        if (sack_mask & (1ull << i)) {
             uint32_t seq = cum_ack + uint32_t((i + 1) * RDT_MSS);
             auto it = out.find(seq);
             if (it != out.end()) it->second.acked = true;
@@ -170,9 +178,18 @@ int main(int argc, char** argv) {
     bool fin_acked = false;
 
     while (true) {
+        // === 清理已确认的段，避免out越来越大 ===
+        while (!out.empty()) {
+            auto it = out.begin();
+            if (it->second.acked) {
+                out.erase(it);
+            } else {
+                break; // 遇到未确认的就停止（保持窗口内的段）
+            }
+        }
+
         // === 计算当前可发送窗口（流控固定窗口 + 拥塞窗口）===
-        int inflight = 0;
-        for (auto& kv : out) if (!kv.second.acked) inflight++;
+        int inflight = (int)out.size(); // 所有未清理的都是inflight
 
         int send_wnd = fixed_wnd;
         int eff_wnd = (cwnd < send_wnd) ? cwnd : send_wnd;
@@ -247,14 +264,14 @@ int main(int argc, char** argv) {
 
                     last_ack = ackno;
 
-                    // 清理窗口前部已acked的段（可选）
-                    // （保留也行，这里简单保留并计数时忽略acked）
 
                 } else if (ackno == last_ack) {
-                    // dupACK
+                    // dupACK - 处理SACK信息
+                    mark_sack_acked(ackno, h.sack_mask, out);
+                    
                     dup_ack_cnt++;
                     if (dup_ack_cnt == 3) {
-                        // 快速重传：重传“最早未确认段”
+                        // 快速重传：重传"最早未确认且未被SACK的段"
                         uint32_t oldest = 0;
                         bool found = false;
                         for (auto& kv : out) {
@@ -283,13 +300,8 @@ int main(int argc, char** argv) {
                     }
                 }
 
-                // 若所有数据都acked，发送FIN
-                bool all_acked = (file_off >= filedata.size());
-                if (all_acked) {
-                    for (auto& kv : out) {
-                        if (!kv.second.acked) { all_acked = false; break; }
-                    }
-                }
+                // 若所有数据都acked，发送FIN（out为空且文件读完）
+                bool all_acked = (file_off >= filedata.size()) && out.empty();
 
                 if (all_acked && !fin_sent) {
                     RdtHeader fin{};
@@ -327,21 +339,20 @@ int main(int argc, char** argv) {
         }
 
     after_recv:
-        // === 超时重传：检查最早未确认段 ===
+        // === 超时重传：检查所有超时的未确认段（真正的SR重传）===
         uint64_t t = now_ms();
-        uint32_t oldest = 0;
-        bool found = false;
+        bool timeout_occurred = false;
+        
         for (auto& kv : out) {
-            if (!kv.second.acked) { oldest = kv.first; found = true; break; }
-        }
-
-        if (found) {
-            auto& seg = out[oldest];
-            if (t - seg.last_sent_ms >= (uint64_t)RDT_RTO_MS) {
-                // Reno timeout反应
-                ssthresh = std::max(1, cwnd / 2);
-                cwnd = 1;
-                dup_ack_cnt = 0;
+            auto& seg = kv.second;
+            if (!seg.acked && (t - seg.last_sent_ms >= (uint64_t)RDT_RTO_MS)) {
+                if (!timeout_occurred) {
+                    // 仅第一次超时触发Reno反应
+                    ssthresh = std::max(1, cwnd / 2);
+                    cwnd = 1;
+                    dup_ack_cnt = 0;
+                    timeout_occurred = true;
+                }
 
                 RdtHeader dh{};
                 dh.seq = seg.seq;
@@ -355,11 +366,12 @@ int main(int argc, char** argv) {
                 seg.retx++;
                 if (seg.retx > RDT_MAX_RETX) die("too many retransmissions");
             }
-        } else {
-            // 没有未确认段了，若已发FIN就只需等FIN/ACK流程结束
         }
 
-        Sleep(1);
+        // 若无事可做，短暂休眠避免CPU满载
+        if (out.empty() && file_off >= filedata.size()) {
+            Sleep(1);
+        }
     }
 
     uint64_t end_ms = now_ms();
