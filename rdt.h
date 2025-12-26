@@ -91,22 +91,6 @@ static inline bool verify_checksum(const RdtHeader& h, const uint8_t* payload) {
     return c == h.cksum;
 }
 
-// 64位主机/网络字节序转换（避免与系统定义冲突）
-#ifndef htonll
-static inline uint64_t htonll(uint64_t h) {
-    uint32_t high = htonl((uint32_t)(h >> 32));
-    uint32_t low = htonl((uint32_t)(h & 0xFFFFFFFF));
-    return ((uint64_t)low << 32) | high;
-}
-#endif
-#ifndef ntohll
-static inline uint64_t ntohll(uint64_t n) {
-    uint32_t high = ntohl((uint32_t)(n >> 32));
-    uint32_t low = ntohl((uint32_t)(n & 0xFFFFFFFF));
-    return ((uint64_t)low << 32) | high;
-}
-#endif
-
 // 网络字节序转换：header里的多字节字段都要hton/ntoh
 static inline void hton_header(RdtHeader& h) {
     h.seq = htonl(h.seq);
@@ -115,7 +99,7 @@ static inline void hton_header(RdtHeader& h) {
     h.wnd = htons(h.wnd);
     h.len = htons(h.len);
     h.cksum = htons(h.cksum);
-    h.sack_mask = htonll(h.sack_mask);
+    h.sack_mask = htonl(h.sack_mask);
 }
 static inline void ntoh_header(RdtHeader& h) {
     h.seq = ntohl(h.seq);
@@ -124,5 +108,5 @@ static inline void ntoh_header(RdtHeader& h) {
     h.wnd = ntohs(h.wnd);
     h.len = ntohs(h.len);
     h.cksum = ntohs(h.cksum);
-    h.sack_mask = ntohll(h.sack_mask);
+    h.sack_mask = ntohl(h.sack_mask);
 }
