@@ -17,12 +17,11 @@
 
 // ====== 可调参数 ======
 static const int    RDT_MSS = 1000;              // 每个数据段payload最大长度（字节）
-static const int    RDT_SACK_BITS = 64;          // SACK位图长度（扩展至64以支持更大窗口）
+static const int    RDT_SACK_BITS = 32;          // SACK位图长度
 static const int    RDT_MAX_PKT = 1400;          // UDP payload最大（保守）
 static const int    RDT_RTO_MS = 300;            // 简化：固定RTO
 static const int    RDT_HANDSHAKE_RTO_MS = 300;  // SYN/FIN重传超时
 static const int    RDT_MAX_RETX = 50;           // 防止死循环
-static const int    RDT_OOO_MAX_SEGS = 128;      // 接收端乱序缓冲最大段数
 
 // ====== flags ======
 enum : uint16_t {
@@ -41,7 +40,7 @@ struct RdtHeader {
     uint16_t wnd;        // 固定窗口（分片数）
     uint16_t len;        // payload长度
     uint16_t cksum;      // checksum (header+payload)
-    uint64_t sack_mask;  // 对 ack 后的 64 个分片的接收情况位图（扩展至64位）
+    uint32_t sack_mask;  // 对 ack 后的 32 个分片的接收情况位图
 };
 #pragma pack(pop)
 
