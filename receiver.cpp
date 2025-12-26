@@ -3,8 +3,6 @@
 #include <vector>
 #include <random>
 
-static const int OOO_MAX_SEGMENTS = 128; // ooo缓冲最大段数限制
-
 struct SegmentBuf {
     std::vector<uint8_t> data;
 };
@@ -212,7 +210,7 @@ int main(int argc, char** argv) {
                     } else if (h.seq > expected_ack) {
                         // 乱序：若在接收窗口范围内则缓存（按fixed_wnd*MSS限制）
                         uint32_t max_seq = expected_ack + (uint32_t)(fixed_wnd * RDT_MSS);
-                        if (h.seq < max_seq && (int)ooo.size() < OOO_MAX_SEGMENTS) {
+                        if (h.seq < max_seq && (int)ooo.size() < RDT_OOO_MAX_SEGS) {
                             if (ooo.find(h.seq) == ooo.end()) {
                                 SegmentBuf sb;
                                 sb.data.assign(payload, payload + h.len);

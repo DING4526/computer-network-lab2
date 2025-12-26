@@ -24,6 +24,7 @@ static const int    RDT_HANDSHAKE_RTO_MS = 300;  // SYN/FIN重传超时
 static const int    RDT_MAX_RETX = 50;           // 防止死循环
 static const int    RDT_DELAY_MIN_MS = 5;        // 网络延时下限（毫秒）
 static const int    RDT_DELAY_MAX_MS = 10;       // 网络延时上限（毫秒）
+static const int    RDT_OOO_MAX_SEGS = 128;      // 接收端乱序缓冲最大段数
 
 // ====== flags ======
 enum : uint16_t {
@@ -90,17 +91,21 @@ static inline bool verify_checksum(const RdtHeader& h, const uint8_t* payload) {
     return c == h.cksum;
 }
 
-// 64位主机/网络字节序转换
+// 64位主机/网络字节序转换（避免与系统定义冲突）
+#ifndef htonll
 static inline uint64_t htonll(uint64_t h) {
     uint32_t high = htonl((uint32_t)(h >> 32));
     uint32_t low = htonl((uint32_t)(h & 0xFFFFFFFF));
     return ((uint64_t)low << 32) | high;
 }
+#endif
+#ifndef ntohll
 static inline uint64_t ntohll(uint64_t n) {
     uint32_t high = ntohl((uint32_t)(n >> 32));
     uint32_t low = ntohl((uint32_t)(n & 0xFFFFFFFF));
     return ((uint64_t)low << 32) | high;
 }
+#endif
 
 // 网络字节序转换：header里的多字节字段都要hton/ntoh
 static inline void hton_header(RdtHeader& h) {
