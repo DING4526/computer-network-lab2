@@ -104,7 +104,7 @@ int main(int argc, char** argv) {
     while (true) {
         uint8_t buf[RDT_MAX_PKT];
         sockaddr_in from{};
-        int fromlen = sizeof(from);
+        socklen_t fromlen = sizeof(from);
         int n = recvfrom(sock, (char*)buf, sizeof(buf), 0, (sockaddr*)&from, &fromlen);
 
         if (n >= (int)sizeof(RdtHeader)) {

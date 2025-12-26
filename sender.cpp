@@ -124,7 +124,7 @@ int main(int argc, char** argv) {
 
         uint8_t buf[RDT_MAX_PKT];
         sockaddr_in from{};
-        int fromlen = sizeof(from);
+        socklen_t fromlen = sizeof(from);
         int n = recvfrom(sock, (char*)buf, sizeof(buf), 0, (sockaddr*)&from, &fromlen);
         if (n >= (int)sizeof(RdtHeader)) {
             RdtHeader h{};
@@ -215,7 +215,7 @@ int main(int argc, char** argv) {
         // === 收 ACK ===
         uint8_t buf[RDT_MAX_PKT];
         sockaddr_in from{};
-        int fromlen = sizeof(from);
+        socklen_t fromlen = sizeof(from);
         int n = recvfrom(sock, (char*)buf, sizeof(buf), 0, (sockaddr*)&from, &fromlen);
 
         if (n >= (int)sizeof(RdtHeader)) {

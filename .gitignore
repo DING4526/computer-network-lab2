@@ -1,3 +1,9 @@
+# 编译生成的可执行文件 (Linux)
+sender
+receiver
+router
+
+# 测试输出文件
+recv_test.txt
+recv.bin
 *.bin
-*.exe
-*.pdf
