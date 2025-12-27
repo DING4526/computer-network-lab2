@@ -51,9 +51,9 @@ struct OutSeg {
 };
 
 // Mark segments acked by SACK bitmap (relative to cumulative ack)
-static void mark_sack_acked(uint32_t cum_ack, uint32_t sack_mask, std::map<uint32_t, OutSeg>& out) {
+static void mark_sack_acked(uint32_t cum_ack, uint64_t sack_mask, std::map<uint32_t, OutSeg>& out) {
     for (int i = 0; i < RDT_SACK_BITS; i++) {
-        if (sack_mask & (1u << i)) {
+        if (sack_mask & (1ull << i)) {
             uint32_t seq = cum_ack + uint32_t((i + 1) * RDT_MSS);
             auto it = out.find(seq);
             if (it != out.end()) it->second.acked = true;

@@ -7,12 +7,12 @@ struct SegmentBuf {
 };
 
 // Build SACK bitmap for segments after expected_ack
-static uint32_t build_sack_mask(uint32_t expected_ack,
+static uint64_t build_sack_mask(uint32_t expected_ack,
                                const std::map<uint32_t, SegmentBuf>& ooo) {
-    uint32_t mask = 0;
+    uint64_t mask = 0;
     for (int i = 0; i < RDT_SACK_BITS; i++) {
         uint32_t seq = expected_ack + uint32_t((i + 1) * RDT_MSS);
-        if (ooo.find(seq) != ooo.end()) mask |= (1u << i);
+        if (ooo.find(seq) != ooo.end()) mask |= (1ull << i);
     }
     return mask;
 }

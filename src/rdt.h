@@ -17,7 +17,7 @@
 
 // ====== Tunables ======
 static constexpr int RDT_MSS               = 1000;   // payload max per segment
-static constexpr int RDT_SACK_BITS         = 32;     // SACK bitmap length
+static constexpr int RDT_SACK_BITS         = 64;     // SACK bitmap length
 static constexpr int RDT_MAX_PKT           = 1400;   // UDP payload cap (safe < 15000 of router)
 static constexpr int RDT_RTO_MS            = 300;    // retransmission timeout (data)
 static constexpr int RDT_HANDSHAKE_RTO_MS  = 300;    // SYN/FIN timeout
@@ -40,7 +40,7 @@ struct RdtHeader {
     uint16_t wnd;        // fixed window size (segments)
     uint16_t len;        // payload length
     uint16_t cksum;      // checksum over header+payload
-    uint32_t sack_mask;  // SACK bitmap for 32 segments after ack
+    uint64_t sack_mask;  // SACK bitmap for 64 segments after ack
 };
 #pragma pack(pop)
 
@@ -85,7 +85,7 @@ static inline void hton_header(RdtHeader& h) {
     h.wnd       = htons(h.wnd);
     h.len       = htons(h.len);
     h.cksum     = htons(h.cksum);
-    h.sack_mask = htonl(h.sack_mask);
+    h.sack_mask = htonll(h.sack_mask);
 }
 static inline void ntoh_header(RdtHeader& h) {
     h.seq       = ntohl(h.seq);
@@ -94,7 +94,7 @@ static inline void ntoh_header(RdtHeader& h) {
     h.wnd       = ntohs(h.wnd);
     h.len       = ntohs(h.len);
     h.cksum     = ntohs(h.cksum);
-    h.sack_mask = ntohl(h.sack_mask);
+    h.sack_mask = ntohll(h.sack_mask);
 }
 
 // checksum is computed in host-order representation consistently on both ends (same as original logic)
