@@ -15,13 +15,13 @@
 
 #pragma comment(lib, "ws2_32.lib")
 
-// ====== 可调参数 ======
-static const int    RDT_MSS = 1000;              // 每个数据段payload最大长度（字节）
-static const int    RDT_SACK_BITS = 32;          // SACK位图长度
-static const int    RDT_MAX_PKT = 1400;          // UDP payload最大（保守）
-static const int    RDT_RTO_MS = 300;            // 简化：固定RTO
-static const int    RDT_HANDSHAKE_RTO_MS = 300;  // SYN/FIN重传超时
-static const int    RDT_MAX_RETX = 50;           // 防止死循环
+// ====== Tunables ======
+static constexpr int RDT_MSS               = 1000;   // payload max per segment
+static constexpr int RDT_SACK_BITS         = 32;     // SACK bitmap length
+static constexpr int RDT_MAX_PKT           = 1400;   // UDP payload cap (safe < 15000 of router)
+static constexpr int RDT_RTO_MS            = 300;    // retransmission timeout (data)
+static constexpr int RDT_HANDSHAKE_RTO_MS  = 300;    // SYN/FIN timeout
+static constexpr int RDT_MAX_RETX          = 50;     // safety
 
 // ====== flags ======
 enum : uint16_t {
@@ -34,19 +34,29 @@ enum : uint16_t {
 
 #pragma pack(push, 1)
 struct RdtHeader {
-    uint32_t seq;        // 本段起始字节序号
-    uint32_t ack;        // 累计确认：下一个期望字节
+    uint32_t seq;        // byte-seq of first byte in this segment (or ISN for SYN)
+    uint32_t ack;        // cumulative ACK: next expected byte
     uint16_t flags;      // SYN/ACK/FIN/DATA/RST
-    uint16_t wnd;        // 固定窗口（分片数）
-    uint16_t len;        // payload长度
-    uint16_t cksum;      // checksum (header+payload)
-    uint32_t sack_mask;  // 对 ack 后的 32 个分片的接收情况位图
+    uint16_t wnd;        // fixed window size (segments)
+    uint16_t len;        // payload length
+    uint16_t cksum;      // checksum over header+payload
+    uint32_t sack_mask;  // SACK bitmap for 32 segments after ack
 };
 #pragma pack(pop)
 
 static inline uint64_t now_ms() {
     using namespace std::chrono;
     return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+}
+
+static inline void LOG(const char* fmt, ...) {
+    uint64_t t = now_ms();
+    std::printf("[%-10llu ms] ", (unsigned long long)t);
+    va_list ap;
+    va_start(ap, fmt);
+    std::vprintf(fmt, ap);
+    va_end(ap);
+    std::printf("\n");
 }
 
 // Internet checksum (16-bit one's complement)
@@ -67,43 +77,72 @@ static inline uint16_t checksum16(const uint8_t* data, size_t len) {
     return uint16_t(~sum & 0xFFFF);
 }
 
-// 写入header checksum前先置0
+// host<->network conversions for header fields
+static inline void hton_header(RdtHeader& h) {
+    h.seq       = htonl(h.seq);
+    h.ack       = htonl(h.ack);
+    h.flags     = htons(h.flags);
+    h.wnd       = htons(h.wnd);
+    h.len       = htons(h.len);
+    h.cksum     = htons(h.cksum);
+    h.sack_mask = htonl(h.sack_mask);
+}
+static inline void ntoh_header(RdtHeader& h) {
+    h.seq       = ntohl(h.seq);
+    h.ack       = ntohl(h.ack);
+    h.flags     = ntohs(h.flags);
+    h.wnd       = ntohs(h.wnd);
+    h.len       = ntohs(h.len);
+    h.cksum     = ntohs(h.cksum);
+    h.sack_mask = ntohl(h.sack_mask);
+}
+
+// checksum is computed in host-order representation consistently on both ends (same as original logic)
 static inline void fill_checksum(RdtHeader& h, const uint8_t* payload) {
     h.cksum = 0;
     uint8_t buf[RDT_MAX_PKT];
-    size_t hdr_len = sizeof(RdtHeader);
-    memcpy(buf, &h, hdr_len);
-    if (h.len > 0 && payload) memcpy(buf + hdr_len, payload, h.len);
+    const size_t hdr_len = sizeof(RdtHeader);
+    std::memcpy(buf, &h, hdr_len);
+    if (h.len > 0 && payload) std::memcpy(buf + hdr_len, payload, h.len);
     h.cksum = checksum16(buf, hdr_len + h.len);
 }
 
 static inline bool verify_checksum(const RdtHeader& h, const uint8_t* payload) {
-    uint8_t buf[RDT_MAX_PKT];
     RdtHeader tmp = h;
     tmp.cksum = 0;
-    size_t hdr_len = sizeof(RdtHeader);
-    memcpy(buf, &tmp, hdr_len);
-    if (h.len > 0 && payload) memcpy(buf + hdr_len, payload, h.len);
+    uint8_t buf[RDT_MAX_PKT];
+    const size_t hdr_len = sizeof(RdtHeader);
+    std::memcpy(buf, &tmp, hdr_len);
+    if (h.len > 0 && payload) std::memcpy(buf + hdr_len, payload, h.len);
     uint16_t c = checksum16(buf, hdr_len + h.len);
     return c == h.cksum;
 }
 
-// 网络字节序转换：header里的多字节字段都要hton/ntoh
-static inline void hton_header(RdtHeader& h) {
-    h.seq = htonl(h.seq);
-    h.ack = htonl(h.ack);
-    h.flags = htons(h.flags);
-    h.wnd = htons(h.wnd);
-    h.len = htons(h.len);
-    h.cksum = htons(h.cksum);
-    h.sack_mask = htonl(h.sack_mask);
+static inline void die(const char* msg) {
+    std::printf("ERROR: %s (WSA=%d)\n", msg, WSAGetLastError());
+    std::exit(1);
 }
-static inline void ntoh_header(RdtHeader& h) {
-    h.seq = ntohl(h.seq);
-    h.ack = ntohl(h.ack);
-    h.flags = ntohs(h.flags);
-    h.wnd = ntohs(h.wnd);
-    h.len = ntohs(h.len);
-    h.cksum = ntohs(h.cksum);
-    h.sack_mask = ntohl(h.sack_mask);
+
+static inline void set_nonblocking(SOCKET s) {
+    u_long mode = 1;
+    if (ioctlsocket(s, FIONBIO, &mode) != 0) die("ioctlsocket nonblocking failed");
+}
+
+static inline int send_pkt(SOCKET s, const sockaddr_in& peer, RdtHeader h, const uint8_t* payload) {
+    fill_checksum(h, payload);
+    RdtHeader net = h;
+    hton_header(net);
+
+    uint8_t buf[RDT_MAX_PKT];
+    std::memcpy(buf, &net, sizeof(RdtHeader));
+    if (h.len > 0 && payload) std::memcpy(buf + sizeof(RdtHeader), payload, h.len);
+
+    return sendto(
+        s,
+        (const char*)buf,
+        int(sizeof(RdtHeader) + h.len),
+        0,
+        (const sockaddr*)&peer,
+        sizeof(peer)
+    );
 }

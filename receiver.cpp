@@ -6,55 +6,26 @@ struct SegmentBuf {
     std::vector<uint8_t> data;
 };
 
-static void die(const char* msg) {
-    printf("ERROR: %s (WSA=%d)\n", msg, WSAGetLastError());
-    exit(1);
-}
-
-static void set_nonblocking(SOCKET s) {
-    u_long mode = 1;
-    if (ioctlsocket(s, FIONBIO, &mode) != 0) die("ioctlsocket nonblocking failed");
-}
-
-static int send_pkt(SOCKET s, const sockaddr_in& peer, RdtHeader h, const uint8_t* payload) {
-    // checksum在host序算，最后整体转network序发送
-    fill_checksum(h, payload);
-    RdtHeader net = h;
-    hton_header(net);
-
-    uint8_t buf[RDT_MAX_PKT];
-    memcpy(buf, &net, sizeof(RdtHeader));
-    if (h.len > 0 && payload) memcpy(buf + sizeof(RdtHeader), payload, h.len);
-
-    int n = sendto(s, (const char*)buf, int(sizeof(RdtHeader) + h.len), 0,
-                   (const sockaddr*)&peer, sizeof(peer));
-    return n;
-}
-
-// 计算SACK位图：对 expected_ack 后面的 若干 个分片
-static uint32_t build_sack_mask(uint32_t expected_ack, int fixed_wnd,
+// Build SACK bitmap for segments after expected_ack
+static uint32_t build_sack_mask(uint32_t expected_ack,
                                const std::map<uint32_t, SegmentBuf>& ooo) {
     uint32_t mask = 0;
-    // 位 i 表示 expected_ack + (i+1)*MSS 处的分片起点是否已收到
     for (int i = 0; i < RDT_SACK_BITS; i++) {
         uint32_t seq = expected_ack + uint32_t((i + 1) * RDT_MSS);
-        if (ooo.find(seq) != ooo.end()) {
-            mask |= (1u << i);
-        }
+        if (ooo.find(seq) != ooo.end()) mask |= (1u << i);
     }
-    (void)fixed_wnd; // 固定窗口在本实现里不动态变化
     return mask;
 }
 
 int main(int argc, char** argv) {
     if (argc < 5) {
-        printf("Usage: receiver.exe <bind_ip> <bind_port> <output_file> <fixed_wnd_segments>\n");
+        std::printf("Usage: receiver.exe <bind_ip> <bind_port> <output_file> <fixed_wnd_segments>\n");
         return 0;
     }
-    std::string bind_ip = argv[1];
-    int bind_port = atoi(argv[2]);
+    std::string bind_ip  = argv[1];
+    int bind_port        = std::atoi(argv[2]);
     std::string out_file = argv[3];
-    int fixed_wnd = atoi(argv[4]);
+    int fixed_wnd        = std::atoi(argv[4]);
 
     WSADATA wsa;
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) die("WSAStartup");
@@ -67,31 +38,23 @@ int main(int argc, char** argv) {
     addr.sin_port = htons((uint16_t)bind_port);
     addr.sin_addr.s_addr = inet_addr(bind_ip.c_str());
     if (bind(sock, (sockaddr*)&addr, sizeof(addr)) != 0) die("bind");
-
     set_nonblocking(sock);
 
-    FILE* fp = fopen(out_file.c_str(), "wb");
-    if (!fp) {
-        printf("ERROR: cannot open output file\n");
-        return 1;
-    }
+    FILE* fp = std::fopen(out_file.c_str(), "wb");
+    if (!fp) die("cannot open output file");
 
-    printf("Receiver listening on %s:%d, output=%s, fixedWnd=%d\n",
-           bind_ip.c_str(), bind_port, out_file.c_str(), fixed_wnd);
+    LOG("Receiver listening on %s:%d, output=%s, fixedWnd=%d",
+        bind_ip.c_str(), bind_port, out_file.c_str(), fixed_wnd);
 
-    // ====== 连接状态 ======
     enum { R_CLOSED, R_SYN_RCVD, R_EST, R_FIN_WAIT } state = R_CLOSED;
+
     sockaddr_in peer{};
-    int peer_len = sizeof(peer);
+    uint32_t isn_recv    = 1000u + (uint32_t)(now_ms() & 0xFFFF);
+    uint32_t sender_isn  = 0;
+    uint32_t expected_ack = 0;
 
-    uint32_t isn_recv = 1000 + (uint32_t)(now_ms() & 0xFFFF);
-    uint32_t sender_isn = 0;
-    uint32_t expected_ack = 0; // 下一个期望字节序号（累计ACK）
-
-    std::map<uint32_t, SegmentBuf> ooo; // out-of-order buffer keyed by seq
-
+    std::map<uint32_t, SegmentBuf> ooo;
     uint64_t start_ms = 0;
-    uint64_t last_ack_sent_ms = 0;
 
     while (true) {
         uint8_t buf[RDT_MAX_PKT];
@@ -101,20 +64,15 @@ int main(int argc, char** argv) {
 
         if (n >= (int)sizeof(RdtHeader)) {
             RdtHeader h{};
-            memcpy(&h, buf, sizeof(RdtHeader));
+            std::memcpy(&h, buf, sizeof(RdtHeader));
             ntoh_header(h);
 
             uint8_t* payload = buf + sizeof(RdtHeader);
-            if (h.len > 0 && (int)(sizeof(RdtHeader) + h.len) > n) {
-                continue; // malformed
-            }
-            if (!verify_checksum(h, payload)) {
-                continue; // checksum fail => drop
-            }
+            if (h.len > 0 && (int)(sizeof(RdtHeader) + h.len) > n) continue;
+            if (!verify_checksum(h, payload)) continue;
 
-            // 只接受一个对端（实验用）
+            // only accept one peer (router will be the peer in router environment)
             if (state == R_CLOSED) {
-                // 期待SYN
                 if (h.flags & F_SYN) {
                     peer = from;
                     sender_isn = h.seq;
@@ -128,12 +86,15 @@ int main(int argc, char** argv) {
                     synack.wnd = (uint16_t)fixed_wnd;
                     synack.len = 0;
                     synack.sack_mask = 0;
+
                     send_pkt(sock, peer, synack, nullptr);
-                    continue;
+                    LOG("RX SYN(seq=%u) -> TX SYN|ACK(seq=%u, ack=%u)", sender_isn, isn_recv, expected_ack);
                 }
+                Sleep(1);
+                continue;
             } else {
-                // 已有peer，非peer来的包忽略
                 if (from.sin_addr.s_addr != peer.sin_addr.s_addr || from.sin_port != peer.sin_port) {
+                    Sleep(1);
                     continue;
                 }
             }
@@ -142,14 +103,15 @@ int main(int argc, char** argv) {
                 if ((h.flags & F_ACK) && h.ack == (isn_recv + 1)) {
                     state = R_EST;
                     start_ms = now_ms();
-                    printf("Connection established.\n");
-                    continue;
+                    LOG("Connection established.");
                 }
+                Sleep(1);
+                continue;
             }
 
             if (state == R_EST) {
                 if (h.flags & F_FIN) {
-                    // 对端请求关闭
+                    // ACK peer FIN
                     RdtHeader ack{};
                     ack.seq = isn_recv + 1;
                     ack.ack = h.seq + 1;
@@ -158,8 +120,9 @@ int main(int argc, char** argv) {
                     ack.len = 0;
                     ack.sack_mask = 0;
                     send_pkt(sock, peer, ack, nullptr);
+                    LOG("RX FIN(seq=%u) -> TX ACK(ack=%u)", h.seq, ack.ack);
 
-                    // 发送自己的FIN
+                    // send our FIN
                     RdtHeader fin{};
                     fin.seq = isn_recv + 2;
                     fin.ack = expected_ack;
@@ -168,27 +131,26 @@ int main(int argc, char** argv) {
                     fin.len = 0;
                     fin.sack_mask = 0;
                     send_pkt(sock, peer, fin, nullptr);
+                    LOG("TX FIN(seq=%u, ack=%u)", fin.seq, fin.ack);
+
                     state = R_FIN_WAIT;
+                    Sleep(1);
                     continue;
                 }
 
                 if (h.flags & F_DATA) {
-                    // 数据段：seq按字节计，长度h.len
                     if (h.seq == expected_ack) {
-                        // 正好是期望段：写入并推进expected_ack
-                        fwrite(payload, 1, h.len, fp);
+                        std::fwrite(payload, 1, h.len, fp);
                         expected_ack += h.len;
 
-                        // 看看缓存里是否有连续的后续段
                         while (true) {
                             auto it = ooo.find(expected_ack);
                             if (it == ooo.end()) break;
-                            fwrite(it->second.data.data(), 1, it->second.data.size(), fp);
+                            std::fwrite(it->second.data.data(), 1, it->second.data.size(), fp);
                             expected_ack += (uint32_t)it->second.data.size();
                             ooo.erase(it);
                         }
                     } else if (h.seq > expected_ack) {
-                        // 乱序：若在接收窗口范围内则缓存（按fixed_wnd*MSS限制）
                         uint32_t max_seq = expected_ack + (uint32_t)(fixed_wnd * RDT_MSS);
                         if (h.seq < max_seq) {
                             if (ooo.find(h.seq) == ooo.end()) {
@@ -198,35 +160,35 @@ int main(int argc, char** argv) {
                             }
                         }
                     } else {
-                        // h.seq < expected_ack：重复段，忽略（但可以回ACK）
+                        // duplicate old segment; ignore payload
                     }
 
-                    // 回 ACK + SACK
+                    // send ACK + SACK
                     RdtHeader ack{};
                     ack.seq = isn_recv + 1;
                     ack.ack = expected_ack;
                     ack.flags = F_ACK;
                     ack.wnd = (uint16_t)fixed_wnd;
                     ack.len = 0;
-                    ack.sack_mask = build_sack_mask(expected_ack, fixed_wnd, ooo);
+                    ack.sack_mask = build_sack_mask(expected_ack, ooo);
                     send_pkt(sock, peer, ack, nullptr);
-                    last_ack_sent_ms = now_ms();
+
+                    // logging (optional: keep concise)
+                    // LOG("TX ACK(ack=%u, sack=0x%08X)", expected_ack, ack.sack_mask);
                 }
             } else if (state == R_FIN_WAIT) {
-                if ((h.flags & F_ACK)) {
-                    // 收到对端对我FIN的ACK就可以结束
+                if (h.flags & F_ACK) {
                     uint64_t end_ms = now_ms();
-                    printf("Connection closed. Receive time = %.3f s\n", (end_ms - start_ms) / 1000.0);
+                    LOG("Connection closed. Receive time = %.3f s", (end_ms - start_ms) / 1000.0);
                     break;
                 }
             }
         }
 
-        // 简单让CPU不满载（也可用select）
         Sleep(1);
     }
 
-    fclose(fp);
+    std::fclose(fp);
     closesocket(sock);
     WSACleanup();
     return 0;
