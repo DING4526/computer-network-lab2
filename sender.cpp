@@ -156,6 +156,7 @@ int main(int argc, char** argv) {
 
     while (true) {
         // effective window = min(fixed flow-control wnd, cwnd)
+        // inflight：当前在途未确认分片数
         int inflight = 0;
         for (auto& kv : out) if (!kv.second.acked) inflight++;
 
@@ -235,13 +236,13 @@ int main(int argc, char** argv) {
                         LOG("ACK advance to %u, cong avoid cwnd=%d ssthresh=%d", ackno, cwnd, ssthresh);
                     }
 
-                    // mark segments cumulatively acked
+                    // 累计ACK：所有 (seq+len)<=ackno 的段 acked=true
                     for (auto& kv : out) {
                         auto& seg = kv.second;
                         if (!seg.acked && (seg.seq + seg.len) <= ackno) seg.acked = true;
                     }
 
-                    // 2) apply SACK
+                    // SACK 标记：mark_sack_acked(ackno, h.sack_mask)
                     mark_sack_acked(ackno, h.sack_mask, out);
 
                     last_ack = ackno;
@@ -249,7 +250,7 @@ int main(int argc, char** argv) {
                 // 2) dupACK
                 else if (ackno == last_ack) {
                     dup_ack_cnt++;
-                    if (dup_ack_cnt == 3) {
+                    if (dup_ack_cnt == 3) { // 快速重传
                         // ====== Reno: Fast Retransmit + Fast Recovery ======
                         uint32_t oldest = 0;
                         bool found = false;
