@@ -1,2 +1,4 @@
 out.bin
 *.exe
+cwnd_log.csv
+cwnd_curve.png

@@ -2,6 +2,44 @@
 #include <map>
 #include <vector>
 #include <algorithm>
+#include <fstream>
+
+// ====== CWND logging for plotting ======
+static std::ofstream cwnd_log_file;
+
+static void cwnd_log_init() {
+    cwnd_log_file.open("cwnd_log.csv", std::ios::out | std::ios::trunc);
+    if (cwnd_log_file.is_open()) {
+        cwnd_log_file << "time_ms,cwnd\n";
+    }
+}
+
+static void cwnd_log_record(int cwnd_value) {
+    if (cwnd_log_file.is_open()) {
+        uint64_t t = now_ms();
+        cwnd_log_file << t << "," << cwnd_value << "\n";
+    }
+}
+
+static void cwnd_log_close() {
+    if (cwnd_log_file.is_open()) {
+        cwnd_log_file.close();
+    }
+}
+
+static void cwnd_plot_generate() {
+    // Generate the plot using Python script (safe in experiment environment)
+    int ret = std::system("python plot_cwnd.py cwnd_log.csv cwnd_curve.png");
+    if (ret != 0) {
+        // Try python3 if python doesn't work
+        ret = std::system("python3 plot_cwnd.py cwnd_log.csv cwnd_curve.png");
+    }
+    if (ret == 0) {
+        LOG("CWND curve plot generated: cwnd_curve.png");
+    } else {
+        LOG("CWND curve data saved to: cwnd_log.csv (run 'python plot_cwnd.py' to generate plot)");
+    }
+}
 
 struct OutSeg {
     uint32_t seq;
@@ -142,6 +180,10 @@ int main(int argc, char** argv) {
     int dup_ack_cnt = 0;
     uint32_t last_ack = base_ack;
 
+    // ====== CWND logging initialization ======
+    cwnd_log_init();
+    cwnd_log_record(cwnd);  // Record initial cwnd value
+
     // ====== send buffer (sliding window) ======
     std::map<uint32_t, OutSeg> out; // key=seq
     size_t file_off = 0;
@@ -227,12 +269,17 @@ int main(int argc, char** argv) {
                     // ====== Reno: Slow Start / Congestion Avoidance ======
                     if (cwnd < ssthresh) {
                         cwnd += 1; // slow start: cwnd += 1 per ACK (segment-granularity)
+                        cwnd_log_record(cwnd);  // Record cwnd change
                         LOG("ACK advance to %u, slow start cwnd=%d ssthresh=%d", ackno, cwnd, ssthresh);
                     } else {
                         // congestion avoidance: cwnd += 1/cwnd per ACK (approx)
                         static double ca_acc = 0.0;
                         ca_acc += 1.0 / cwnd;
-                        if (ca_acc >= 1.0) { cwnd += 1; ca_acc -= 1.0; }
+                        if (ca_acc >= 1.0) {
+                            cwnd += 1;
+                            ca_acc -= 1.0;
+                            cwnd_log_record(cwnd);  // Record cwnd change
+                        }
                         LOG("ACK advance to %u, cong avoid cwnd=%d ssthresh=%d", ackno, cwnd, ssthresh);
                     }
 
@@ -260,6 +307,7 @@ int main(int argc, char** argv) {
                         if (found) {
                             ssthresh = std::max(1, cwnd / 2);
                             cwnd = ssthresh + 3;
+                            cwnd_log_record(cwnd);  // Record cwnd change (fast retransmit)
 
                             auto& seg = out[oldest];
                             RdtHeader dh{};
@@ -278,6 +326,7 @@ int main(int argc, char** argv) {
                         }
                     } else if (dup_ack_cnt > 3) {
                         cwnd += 1; // fast recovery inflate
+                        cwnd_log_record(cwnd);  // Record cwnd change (fast recovery)
                         LOG("dupACK #%d -> fast recovery cwnd=%d", dup_ack_cnt, cwnd);
                     }
                 }
@@ -329,6 +378,7 @@ int main(int argc, char** argv) {
                 ssthresh = std::max(1, cwnd / 2);
                 cwnd = 1;
                 dup_ack_cnt = 0;
+                cwnd_log_record(cwnd);  // Record cwnd change (timeout)
 
                 RdtHeader dh{};
                 dh.seq = seg.seq;
@@ -373,6 +423,10 @@ int main(int argc, char** argv) {
     double sec = (end_ms - start_ms) / 1000.0;
     double throughput = (filedata.size() / 1024.0 / 1024.0) / std::max(1e-9, sec);
     LOG("Transfer done. time=%.3f s, avg throughput=%.3f MB/s", sec, throughput);
+
+    // ====== CWND logging: close and generate plot ======
+    cwnd_log_close();
+    cwnd_plot_generate();
 
     closesocket(sock);
     WSACleanup();
